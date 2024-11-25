@@ -1,94 +1,81 @@
 from flask import Flask, request, jsonify
-from tensorflow.keras.models import load_model
-from transformers import BertTokenizer, TFBertModel, TFAlbertModel, AlbertTokenizer
 import tensorflow as tf
+from transformers import BertTokenizer, TFAutoModel
+from sklearn.preprocessing import LabelEncoder
 import numpy as np
+import pickle
 
+# Inisialisasi Flask
 app = Flask(__name__)
 
-# Path model dan tokenizer
-MODEL_PATH = "nlp_emotion_indobert.h5"
-TOKENIZER_NAME = "bert-base-uncased"  # Ubah ke "albert-base-v2" jika menggunakan Albert    
+# Parameter
+max_length = 128
 
-# Daftar label sesuai model Anda (sesuaikan dengan urutan output model)
-labels_translated = ["Kegembiraan", "Kemarahan", "Kesedihan", "Ketakutan"]
+# Lazy Loading
+model = None
+tokenizer = None
+label_encoder = None
 
-# Softmax manual menggunakan NumPy
-def softmax(logits):
-    exp_logits = np.exp(logits - np.max(logits))  # Stabilkan dengan pengurangan max
-    return exp_logits / np.sum(exp_logits)
+def load_resources():
+    global model, tokenizer, label_encoder
+    if not model or not tokenizer or not label_encoder:
+        # Muat tokenizer
+        tokenizer = BertTokenizer.from_pretrained('indobenchmark/indobert-lite-large-p2')
 
-# Pemuatan model
-try:
-    # Pastikan lapisan sesuai dengan model Anda
-    with tf.keras.utils.custom_object_scope({'TFBertModel': TFBertModel, 'TFAlbertModel': TFAlbertModel}):
-        model = load_model(MODEL_PATH)
-    print("Model berhasil dimuat.")
-except Exception as e:
-    print(f"Error saat memuat model: {e}")
-    model = None
+        # Muat label encoder
+        with open('label_encoder/label_encoder.pkl', 'rb') as f:
+            label_encoder = pickle.load(f)
 
-# Pemuatan tokenizer
-try:
-    # Gunakan tokenizer sesuai model
-    tokenizer = BertTokenizer.from_pretrained(TOKENIZER_NAME)  # Ubah ke AlbertTokenizer jika Albert digunakan
-    print("Tokenizer berhasil dimuat.")
-except Exception as e:
-    print(f"Error saat memuat tokenizer: {e}")
-    tokenizer = None
+        # Muat model
+        bert_model = TFAutoModel.from_pretrained('indobenchmark/indobert-lite-large-p2')
+        input_ids = tf.keras.layers.Input(shape=(max_length,), dtype=tf.int32, name='input_ids')
+        attention_masks = tf.keras.layers.Input(shape=(max_length,), dtype=tf.int32, name='attention_masks')
+        pooled_output = bert_model(input_ids, attention_mask=attention_masks).pooler_output
+        dropout = tf.keras.layers.Dropout(0.3)(pooled_output)
+        output = tf.keras.layers.Dense(4, activation='softmax')(dropout)
+        model_temp = tf.keras.Model(inputs=[input_ids, attention_masks], outputs=output)
+        model_temp.load_weights('model_weights/nlp_emotion_indobert.h5')
+        model = model_temp
 
-@app.route("/")
-def home():
-    return "NLP Emotion API is Running!"
+def preprocess_texts(texts):
+    inputs = tokenizer(
+        texts,
+        add_special_tokens=True,
+        max_length=max_length,
+        padding='max_length',
+        truncation=True,
+        return_tensors="np"
+    )
+    return inputs['input_ids'], inputs['attention_mask']
 
-@app.route("/predict", methods=["POST"])
+@app.route('/predict', methods=['POST'])
 def predict():
-    # Validasi input
+    # Muat resource jika belum dimuat
+    load_resources()
+
+    # Ambil data teks dari request
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Input must contain 'text' key"}), 400
+    texts = data.get('texts')
 
-    input_text = data["text"]
+    # Validasi input
+    if isinstance(texts, str):
+        texts = [texts]
+    if not isinstance(texts, list):
+        return jsonify({"error": "Input harus berupa string atau list"}), 400
 
-    try:
-        # Pastikan tokenizer dan model telah dimuat
-        if tokenizer is None or model is None:
-            return jsonify({"error": "Model or tokenizer failed to load"}), 500
+    # Preproses teks
+    input_ids, attention_masks = preprocess_texts(texts)
 
-        # Tokenize teks
-        tokens = tokenizer(
-            input_text,
-            padding="max_length",
-            truncation=True,
-            max_length=128,  # Sesuaikan dengan konfigurasi model Anda
-            return_tensors="tf"
-        )
+    # Prediksi
+    predictions = model.predict({'input_ids': input_ids, 'attention_masks': attention_masks})
+    predicted_classes = np.argmax(predictions, axis=1)
+    predicted_labels = label_encoder.inverse_transform(predicted_classes)
 
-        # Prediksi
-        prediction = model.predict([tokens["input_ids"], tokens["attention_mask"]])
+    # Respons JSON
+    return jsonify({
+        'texts': texts,
+        'predictions': predicted_labels.tolist()
+    })
 
-        # Normalisasi skor dengan softmax manual
-        emotion_scores = softmax(prediction[0])
-        predicted_label = np.argmax(emotion_scores)
-
-        # Debugging (opsional, untuk memeriksa urutan label dan skor)
-        print("Input Text:", input_text)
-        print("Prediction Scores:", emotion_scores)
-        for i, score in enumerate(emotion_scores):
-            print(f"Label {i}: {score:.4f} -> {labels_translated[i]}")
-
-        # Ambil label emosi berdasarkan prediksi
-        predicted_emotion = labels_translated[predicted_label]
-
-        return jsonify({
-            "text": input_text,
-            "predicted_label": int(predicted_label),
-            "predicted_emotion": predicted_emotion,
-            "scores": emotion_scores.tolist()
-        })
-    except Exception as e:
-        return jsonify({"error": f"Prediction error: {str(e)}"}), 500
-
-
-if __name__ == "__main__":
-    app.run(debug=True)
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
