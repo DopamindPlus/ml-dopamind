@@ -11,33 +11,48 @@ app = Flask(__name__)
 # Parameter
 max_length = 128
 
-# Lazy Loading
-model = None
+# Lazy Loading untuk resource
 tokenizer = None
 label_encoder = None
+model = None
 
 def load_resources():
-    global model, tokenizer, label_encoder
-    if not model or not tokenizer or not label_encoder:
+    global tokenizer, label_encoder, model
+    if not tokenizer:
         # Muat tokenizer
         tokenizer = BertTokenizer.from_pretrained('indobenchmark/indobert-lite-large-p2')
 
-        # Muat label encoder
+    if not label_encoder:
+        # Muat label encoder dari file
         with open('label_encoder/label_encoder.pkl', 'rb') as f:
             label_encoder = pickle.load(f)
 
-        # Muat model
+    if not model:
+        # Buat ulang model
         bert_model = TFAutoModel.from_pretrained('indobenchmark/indobert-lite-large-p2')
+
         input_ids = tf.keras.layers.Input(shape=(max_length,), dtype=tf.int32, name='input_ids')
         attention_masks = tf.keras.layers.Input(shape=(max_length,), dtype=tf.int32, name='attention_masks')
+
+        # Dapatkan output dari model BERT
+        sequence_output = bert_model(input_ids, attention_mask=attention_masks).last_hidden_state
         pooled_output = bert_model(input_ids, attention_mask=attention_masks).pooler_output
-        dropout = tf.keras.layers.Dropout(0.3)(pooled_output)
+
+        # Gabungkan sequence output dan pooled output
+        merged_output = tf.keras.layers.concatenate([sequence_output[:, 0, :], pooled_output])
+
+        # Tambahkan lapisan tambahan untuk klasifikasi
+        dense = tf.keras.layers.Dense(128, activation='relu')(merged_output)
+        dropout = tf.keras.layers.Dropout(0.3)(dense)
         output = tf.keras.layers.Dense(4, activation='softmax')(dropout)
+
         model_temp = tf.keras.Model(inputs=[input_ids, attention_masks], outputs=output)
+
+        # Load bobot model yang telah dilatih
         model_temp.load_weights('model_weights/nlp_emotion_indobert.h5')
         model = model_temp
 
-def preprocess_texts(texts):
+def preprocess_texts(texts, tokenizer, max_length):
     inputs = tokenizer(
         texts,
         add_special_tokens=True,
@@ -50,7 +65,7 @@ def preprocess_texts(texts):
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    # Muat resource jika belum dimuat
+    # Pastikan resource dimuat terlebih dahulu
     load_resources()
 
     # Ambil data teks dari request
@@ -64,18 +79,28 @@ def predict():
         return jsonify({"error": "Input harus berupa string atau list"}), 400
 
     # Preproses teks
-    input_ids, attention_masks = preprocess_texts(texts)
+    input_ids, attention_masks = preprocess_texts(texts, tokenizer, max_length)
 
-    # Prediksi
+    # Lakukan prediksi
     predictions = model.predict({'input_ids': input_ids, 'attention_masks': attention_masks})
+
+    # Dapatkan probabilitas masing-masing kelas
     predicted_classes = np.argmax(predictions, axis=1)
     predicted_labels = label_encoder.inverse_transform(predicted_classes)
 
-    # Respons JSON
-    return jsonify({
-        'texts': texts,
-        'predictions': predicted_labels.tolist()
-    })
+    # Buat respons JSON
+    response = {
+        'results': []
+    }
+    for i, text in enumerate(texts):
+        response['results'].append({
+            'text': text,
+            'predicted_label': predicted_labels[i],
+            'probabilities': {
+                label: float(predictions[i][idx]) for idx, label in enumerate(label_encoder.classes_)
+            }
+        })
+    return jsonify(response)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
