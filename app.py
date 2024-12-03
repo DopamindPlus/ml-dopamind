@@ -4,9 +4,21 @@ from transformers import BertTokenizer, TFAutoModel
 from sklearn.preprocessing import LabelEncoder
 import numpy as np
 import pickle
+import logging
+from logging.handlers import RotatingFileHandler
+import os
 
 # Inisialisasi Flask
 app = Flask(__name__)
+
+port = int(os.environ.get("PORT", 8080))
+
+# Menambahkan logging untuk produksi
+handler = RotatingFileHandler('app.log', maxBytes=10000000, backupCount=3)
+handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+app.logger.addHandler(handler)
 
 # Definisi tokenizer dan model
 max_length = 128
@@ -64,35 +76,41 @@ def preprocess_texts(texts, tokenizer, max_length):
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    # Ambil data teks dari request
-    data = request.get_json()
-    texts = data.get('texts')  # Ambil key 'texts'
+    try:
+        # Ambil data teks dari request
+        data = request.get_json()
+        texts = data.get('texts')  # Ambil key 'texts'
 
-    # Jika input adalah string, ubah menjadi list
-    if isinstance(texts, str):
-        texts = [texts]
+        # Jika input adalah string, ubah menjadi list
+        if isinstance(texts, str):
+            texts = [texts]
 
-    # Jika input bukan string atau list, kembalikan error
-    if not isinstance(texts, list):
-        return jsonify({"error": "Input harus berupa string atau list"}), 400
+        # Jika input bukan string atau list, kembalikan error
+        if not isinstance(texts, list):
+            return jsonify({"error": "Input harus berupa string atau list"}), 400
 
-    # Preproses teks
-    input_ids, attention_masks = preprocess_texts(texts, tokenizer, max_length)
+        # Preproses teks
+        input_ids, attention_masks = preprocess_texts(texts, tokenizer, max_length)
 
-    # Lakukan prediksi
-    predictions = model.predict({'input_ids': input_ids, 'attention_masks': attention_masks})
-    predicted_classes = np.argmax(predictions, axis=1)
+        # Lakukan prediksi
+        predictions = model.predict({'input_ids': input_ids, 'attention_masks': attention_masks})
+        predicted_classes = np.argmax(predictions, axis=1)
 
-    # Konversi indeks ke label deskriptif
-    predicted_labels = label_encoder.inverse_transform(predicted_classes)
+        # Konversi indeks ke label deskriptif
+        predicted_labels = label_encoder.inverse_transform(predicted_classes)
 
-    # Buat respons JSON
-    response = {
-        'texts': texts,
-        'predictions': predicted_labels.tolist()
-    }
-    return jsonify(response)
+        # Buat respons JSON
+        response = {
+            'texts': texts,
+            'predictions': predicted_labels.tolist()
+        }
+        return jsonify(response)
 
+    except Exception as e:
+        # Log error jika ada kesalahan dalam proses prediksi
+        app.logger.error(f"Error processing prediction: {str(e)}")
+        return jsonify({"error": "Terjadi kesalahan saat memproses permintaan"}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+# Menjalankan aplikasi dengan Gunicorn
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=port)
