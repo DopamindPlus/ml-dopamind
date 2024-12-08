@@ -61,15 +61,24 @@ model = create_model()
 model.load_weights('model_weights/nlp_emotion_indobert.h5')  # Path bobot model Anda
 
 # Middleware untuk verifikasi token
+# Middleware untuk verifikasi token
 def auth_middleware(f):
     def wrapper(*args, **kwargs):
         token = request.headers.get('Authorization')
+
         if not token:
             return jsonify({"error": "Token tidak ditemukan"}), 403
 
+        # Pastikan token diawali dengan 'Bearer '
+        if not token.startswith('Bearer '):
+            return jsonify({"error": "Format token salah, harus menggunakan Bearer token"}), 400
+
+        # Ambil token setelah 'Bearer ' (untuk memisahkan token dari kata 'Bearer')
+        token = token.split(' ')[1]
+
         try:
             decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-            request.user = decoded 
+            request.user = decoded  # Menyimpan data pengguna yang didekode di request.user
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token telah kadaluarsa"}), 401
         except jwt.InvalidTokenError:
@@ -78,6 +87,7 @@ def auth_middleware(f):
         return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
+
 
 # Fungsi untuk memproses teks
 def preprocess_texts(texts, tokenizer, max_length):
