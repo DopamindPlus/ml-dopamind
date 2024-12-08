@@ -112,41 +112,38 @@ def preprocess_texts(texts, tokenizer, max_length):
 @auth_middleware
 def predict():
     try:
-        # Ambil data teks dari request
         data = request.get_json()
-        texts = data.get('texts')  # Ambil key 'texts'
+        texts = data.get('texts')
 
-        # Jika input adalah string, ubah menjadi list
         if isinstance(texts, str):
             texts = [texts]
 
-        # Jika input bukan string atau list, kembalikan error
         if not isinstance(texts, list):
             return jsonify({"error": "Input harus berupa string atau list"}), 400
 
-        # Preproses teks
         input_ids, attention_masks = preprocess_texts(texts, tokenizer, max_length)
-
-        # Lakukan prediksi
         predictions = model.predict({'input_ids': input_ids, 'attention_masks': attention_masks})
         predicted_classes = np.argmax(predictions, axis=1)
-
-        # Konversi indeks ke label deskriptif
         predicted_labels = label_encoder.inverse_transform(predicted_classes)
 
-        # Buat respons JSON
-        response = {
-            'texts': texts,
-            'predictions': predicted_labels.tolist()
-        }
+        # Membuat respons yang sesuai dengan jumlah teks yang diprediksi
+        if len(texts) == 1:
+            response = {
+                'texts': texts[0],
+                'predictions': predicted_labels[0]
+            }
+        else:
+            response = {
+                'texts': texts,
+                'predictions': predicted_labels.tolist()
+            }
 
-        # Kirim data ke backend untuk disimpan di database
         save_response = {
-            "texts": texts,
-            "predictions": predicted_labels.tolist(),
+            "texts": texts[0] if len(texts) == 1 else texts,
+            "predictions": predicted_labels[0] if len(texts) == 1 else predicted_labels.tolist()
         }
         headers = {
-            "Authorization": request.headers.get('Authorization'), 
+            "Authorization": request.headers.get('Authorization'),
             "Content-Type": "application/json"
         }
         backend_url = "http://34.101.142.68:9000/api/mood"
@@ -159,7 +156,6 @@ def predict():
         return jsonify(response)
 
     except Exception as e:
-        # Log error jika ada kesalahan dalam proses prediksi
         app.logger.error(f"Error processing prediction: {str(e)}")
         return jsonify({"error": "Terjadi kesalahan saat memproses permintaan"}), 500
 
