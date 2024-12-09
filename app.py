@@ -146,7 +146,7 @@ def predict():
             "Authorization": request.headers.get('Authorization'),
             "Content-Type": "application/json"
         }
-        backend_url = "http://34.101.142.68:9000/api/mood"
+        backend_url = "http://34.101.128.115:9000/api/mood"
         save_result = requests.post(backend_url, json=save_response, headers=headers)
 
         if save_result.status_code != 201:
