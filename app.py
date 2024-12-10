@@ -6,6 +6,8 @@ import numpy as np
 import pickle
 import logging
 from logging.handlers import RotatingFileHandler
+import jwt
+import requests
 import os
 
 # Inisialisasi Flask
@@ -19,6 +21,9 @@ handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 app.logger.addHandler(handler)
+
+# Konfigurasi JWT
+SECRET_KEY = "CHANGETHISPLEASE" 
 
 # Definisi tokenizer dan model
 max_length = 128
@@ -55,6 +60,35 @@ model = create_model()
 # Load bobot model yang telah dilatih
 model.load_weights('model_weights/nlp_emotion_indobert.h5')  # Path bobot model Anda
 
+# Middleware untuk verifikasi token
+# Middleware untuk verifikasi token
+def auth_middleware(f):
+    def wrapper(*args, **kwargs):
+        token = request.headers.get('Authorization')
+
+        if not token:
+            return jsonify({"error": "Token tidak ditemukan"}), 403
+
+        # Pastikan token diawali dengan 'Bearer '
+        if not token.startswith('Bearer '):
+            return jsonify({"error": "Format token salah, harus menggunakan Bearer token"}), 400
+
+        # Ambil token setelah 'Bearer ' (untuk memisahkan token dari kata 'Bearer')
+        token = token.split(' ')[1]
+
+        try:
+            decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            request.user = decoded  # Menyimpan data pengguna yang didekode di request.user
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token telah kadaluarsa"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Token tidak valid"}), 401
+
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__
+    return wrapper
+
+
 # Fungsi untuk memproses teks
 def preprocess_texts(texts, tokenizer, max_length):
     input_ids = []
@@ -75,39 +109,53 @@ def preprocess_texts(texts, tokenizer, max_length):
     return np.array(input_ids), np.array(attention_masks)
 
 @app.route('/predict', methods=['POST'])
+@auth_middleware
 def predict():
     try:
-        # Ambil data teks dari request
         data = request.get_json()
-        texts = data.get('texts')  # Ambil key 'texts'
+        texts = data.get('texts')
 
-        # Jika input adalah string, ubah menjadi list
         if isinstance(texts, str):
             texts = [texts]
 
-        # Jika input bukan string atau list, kembalikan error
         if not isinstance(texts, list):
             return jsonify({"error": "Input harus berupa string atau list"}), 400
 
-        # Preproses teks
         input_ids, attention_masks = preprocess_texts(texts, tokenizer, max_length)
-
-        # Lakukan prediksi
         predictions = model.predict({'input_ids': input_ids, 'attention_masks': attention_masks})
         predicted_classes = np.argmax(predictions, axis=1)
-
-        # Konversi indeks ke label deskriptif
         predicted_labels = label_encoder.inverse_transform(predicted_classes)
 
-        # Buat respons JSON
-        response = {
-            'texts': texts,
-            'predictions': predicted_labels.tolist()
+        # Membuat respons yang sesuai dengan jumlah teks yang diprediksi
+        if len(texts) == 1:
+            response = {
+                'texts': texts[0],
+                'predictions': predicted_labels[0]
+            }
+        else:
+            response = {
+                'texts': texts,
+                'predictions': predicted_labels.tolist()
+            }
+
+        save_response = {
+            "texts": texts[0] if len(texts) == 1 else texts,
+            "predictions": predicted_labels[0] if len(texts) == 1 else predicted_labels.tolist()
         }
+        headers = {
+            "Authorization": request.headers.get('Authorization'),
+            "Content-Type": "application/json"
+        }
+        backend_url = "http://34.101.128.115:9000/api/mood"
+        save_result = requests.post(backend_url, json=save_response, headers=headers)
+
+        if save_result.status_code != 201:
+            app.logger.error("Failed to save prediction to database")
+            return jsonify({"error": "Gagal menyimpan prediksi ke database"}), 500
+
         return jsonify(response)
 
     except Exception as e:
-        # Log error jika ada kesalahan dalam proses prediksi
         app.logger.error(f"Error processing prediction: {str(e)}")
         return jsonify({"error": "Terjadi kesalahan saat memproses permintaan"}), 500
 
